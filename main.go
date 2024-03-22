@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -27,6 +28,10 @@ type Results struct {
 	Host string
 	IP   string
 }
+
+var (
+	finalResults []Results
+)
 
 func checkVHost(dialer *net.Dialer, s string, i string, v *bool, wg *sync.WaitGroup) {
 	defer wg.Done()
@@ -82,6 +87,8 @@ func checkVHost(dialer *net.Dialer, s string, i string, v *bool, wg *sync.WaitGr
 			_, err = net.LookupIP(s)
 			if err != nil {
 				color.Green("Interesting Vhost: %s: %s\n", s, i)
+				// Append to finalResults
+				finalResults = append(finalResults, Results{Host: s, IP: i})
 			}
 			// else {
 			// 	for _, sanIP := range sanIPs {
@@ -242,4 +249,40 @@ func main() {
 		// }
 	}
 	wg.Wait()
+
+	// Write the results to a file in the format of IP: Host like the /etc/hosts file
+	fh, err := os.Create(fmt.Sprintf("vhosts_%s.txt", time.Now().Format("2006-01-02_15:04:05")))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer fh.Close()
+	fh.WriteString("##### Interesting Vhosts ##### \n")
+	for _, r := range finalResults {
+		_, err := fh.WriteString(r.IP + " " + r.Host + "\n")
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	color.Green("Results written to vhosts.txt\n")
+
+}
+
+func removeDuplicates(elements []Results) []Results {
+	// Use map to record duplicates as we find them.
+	encountered := map[Results]bool{}
+	result := []Results{}
+
+	for v := range elements {
+		if encountered[elements[v]] {
+			// Do not add duplicate.
+		} else {
+			// Record this element as an encountered element.
+			encountered[elements[v]] = true
+			// Append to result slice.
+			result = append(result, elements[v])
+		}
+	}
+	// Return the new slice.
+	return result
 }
