@@ -15,7 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-
+	"encoding/json"
+	
 	"github.com/fatih/color"
 )
 
@@ -239,28 +240,33 @@ func main() {
 		log.Fatal(err)
 	}
 	defer fh.Close()
-	fh.WriteString("##### Interesting Vhosts ##### \n")
-	for _, r := range finalResults {
-		var data string
-		// Print all the HTTP response headers
-		data += fmt.Sprintf("-------------\n")
-		// Print the response status
-		data += fmt.Sprintf("Status: %s\n", r.ResponseStatus)
-		data += fmt.Sprintf("Title: %s\n", r.Title)
-		// Print the response headers
-		for _, v := range r.ResponseHeaders {
-			for k, x := range v {
-				data += fmt.Sprintf("%s: %s\n", k, x)
-			}
-		}
-		data += fmt.Sprintf("-------------")
+	// fh.WriteString("##### Interesting Vhosts ##### \n")
+	// for _, r := range finalResults {
+		// var data string
+		// // Print all the HTTP response headers
+		// data += fmt.Sprintf("-------------\n")
+		// // Print the response status
+		// data += fmt.Sprintf("Status: %s\n", r.ResponseStatus)
+		// data += fmt.Sprintf("Title: %s\n", r.Title)
+		// // Print the response headers
+		// for _, v := range r.ResponseHeaders {
+		// 	for k, x := range v {
+		// 		data += fmt.Sprintf("%s: %s\n", k, x)
+		// 	}
+		// }
+		// data += fmt.Sprintf("-------------")
 		
-		_, err := fh.WriteString(r.IP + " " + r.Host + "\n" + data  + "\n")
+		jsonData, err := json.Marshal(finalResults) 
+		if err != nil {
+			log.Fatal(err)
+		}
+		_, err = fh.Write(jsonData)
+		// _, err := fh.WriteString(r.IP + " " + r.Host + "\n" + data  + "\n")
 
 		if err != nil {  
 			log.Fatal(err)
 		}
-	}
+	// }
 
 	color.Green("Results written to %s\n", writeFilename)
 }
