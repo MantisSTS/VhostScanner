@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -27,6 +28,10 @@ type TLSxResults struct {
 type Results struct {
 	Host string
 	IP   string
+	ResponseHeaders []map[string]string
+	ResponseBody    string
+	ResponseStatus string
+	Title string
 }
 
 var (
@@ -87,17 +92,32 @@ func checkVHost(dialer *net.Dialer, s string, i string, v *bool, wg *sync.WaitGr
 			_, err = net.LookupIP(s)
 			if err != nil {
 				color.Green("Interesting Vhost: %s: %s\n", s, i)
+				
+
+				// Print all the HTTP response headers
+				fmt.Println("-------------")
+				// Print the response status
+				fmt.Printf("Status: %s\n", resp.Status)
+
+				// Print the response body title
+				title := ""
+				if strings.Contains(string(body), "<title>") {
+					start := strings.Index(string(body), "<title>")
+					end := strings.Index(string(body), "</title>")
+					title = string(body)[start+len("<title>") : end]
+				}
+				fmt.Printf("Title: %s\n", title)
+				var respHeaders []map[string]string
+				// Print the response headers
+				for k, v := range resp.Header {
+					fmt.Printf("%s: %s\n", k, v)
+					respHeaders = append(respHeaders, map[string]string{k: strings.Join(v, " ")})
+				}
+				fmt.Println("-------------")
+
 				// Append to finalResults
-				finalResults = append(finalResults, Results{Host: s, IP: i})
+				finalResults = append(finalResults, Results{Host: s, IP: i, ResponseHeaders: respHeaders, ResponseBody: string(body), Title: title, ResponseStatus: resp.Status})
 			}
-			// else {
-			// 	for _, sanIP := range sanIPs {
-			// 		if sanIP.String() == i {
-			// 			color.Green("SAN IP Match Found! [SAN: %s | IP: %s]\n", s, i)
-			// 			break
-			// 		}
-			// 	}
-			// }
 		}
 	}
 }
@@ -208,72 +228,49 @@ func main() {
 				go checkVHost(dialer, s, i, v, &wg)
 			}
 		}
-
-		// 		httpReq, err := http.NewRequest("GET", "https://"+s+"/", nil)
-		// 		if err != nil {
-		// 			if *v {
-		// 				log.Printf("Could not create request: %v", err)
-		// 			}
-		// 		}
-
-		// 		httpReq.Host = s
-
-		// 		http.DefaultTransport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		// 			if addr == s+":443" {
-		// 				addr = i + ":443"
-		// 			}
-		// 			return dialer.DialContext(ctx, network, addr)
-		// 		}
-
-		// 		resp, err := http.DefaultClient.Do(httpReq)
-		// 		if err == nil {
-
-		// 			defer resp.Body.Close()
-
-		// 			body, err := io.ReadAll(io.Reader(resp.Body))
-		// 			if err != nil {
-		// 				if *v {
-		// 					log.Printf("Could not read response: %v", err)
-		// 				}
-		// 			}
-
-		// 			if body != nil {
-		// 				color.Green("VHost Found! [Host: %s | IP: %s]\n", s, i)
-		// 			}
-		// 		} else {
-		// 			if *v {
-		// 				log.Printf("Could not send request: %v", err)
-		// 			}
-		// 		}
-		// 	}
-		// }
 	}
 	wg.Wait()
 
+	writeFilename := fmt.Sprintf("vhosts_%s.txt", time.Now().Format("2006-01-02_15-04-05"))
+
 	// Write the results to a file in the format of IP: Host like the /etc/hosts file
-	fh, err := os.Create(fmt.Sprintf("vhosts_%s.txt", time.Now().Format("2006-01-02_15:04:05")))
+	fh, err := os.Create(writeFilename)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer fh.Close()
 	fh.WriteString("##### Interesting Vhosts ##### \n")
 	for _, r := range finalResults {
-		_, err := fh.WriteString(r.IP + " " + r.Host + "\n")
-		if err != nil {
+		var data string
+		// Print all the HTTP response headers
+		data += fmt.Sprintf("-------------\n")
+		// Print the response status
+		data += fmt.Sprintf("Status: %s\n", r.ResponseStatus)
+		data += fmt.Sprintf("Title: %s\n", r.Title)
+		// Print the response headers
+		for _, v := range r.ResponseHeaders {
+			for k, x := range v {
+				data += fmt.Sprintf("%s: %s\n", k, x)
+			}
+		}
+		data += fmt.Sprintf("-------------")
+		
+		_, err := fh.WriteString(r.IP + " " + r.Host + "\n" + data  + "\n")
+
+		if err != nil {  
 			log.Fatal(err)
 		}
 	}
 
-	color.Green("Results written to vhosts.txt\n")
-
+	color.Green("Results written to %s\n", writeFilename)
 }
 
-func removeDuplicates(elements []Results) []Results {
+//func removeDuplicates(elements []Results) []Results {
 	// Use map to record duplicates as we find them.
-	encountered := map[Results]bool{}
-	result := []Results{}
-
-	for v := range elements {
+//	encountered := map[Results]bool{}
+//	result := []Results{}
+//
+/*	for v := range elements {
 		if encountered[elements[v]] {
 			// Do not add duplicate.
 		} else {
@@ -286,3 +283,4 @@ func removeDuplicates(elements []Results) []Results {
 	// Return the new slice.
 	return result
 }
+*/
