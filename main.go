@@ -27,16 +27,17 @@ type TLSxResults struct {
 }
 
 type Results struct {
+	ResponseStatus string `json:omitempty`
 	Host string
 	IP   string
-	ResponseHeaders []map[string]string
-	ResponseBody    string
-	ResponseStatus string
 	Title string
+	ResponseHeaders []string
+	ResponseBody    string
 }
 
 var (
 	finalResults []Results
+	includeBody bool
 )
 
 func checkVHost(dialer *net.Dialer, s string, i string, v *bool, wg *sync.WaitGroup) {
@@ -108,16 +109,33 @@ func checkVHost(dialer *net.Dialer, s string, i string, v *bool, wg *sync.WaitGr
 					title = string(body)[start+len("<title>") : end]
 				}
 				fmt.Printf("Title: %s\n", title)
-				var respHeaders []map[string]string
+				var respHeaders []string
 				// Print the response headers
 				for k, v := range resp.Header {
-					fmt.Printf("%s: %s\n", k, v)
-					respHeaders = append(respHeaders, map[string]string{k: strings.Join(v, " ")})
+					fmt.Printf("%s: %s\n", k, strings.Join(v, " "))
+					respHeaders = append(respHeaders, fmt.Sprintf("%s: %s", k, strings.Join(v, " ")))
 				}
 				fmt.Println("-------------")
 
 				// Append to finalResults
-				finalResults = append(finalResults, Results{Host: s, IP: i, ResponseHeaders: respHeaders, ResponseBody: string(body), Title: title, ResponseStatus: resp.Status})
+				if includeBody {
+					finalResults = append(finalResults, Results{
+						ResponseStatus: resp.Status,
+						Host: s, 
+						IP: i,
+						Title: title,
+						ResponseHeaders: respHeaders,
+						ResponseBody: string(body),
+					})
+				} else {
+					finalResults = append(finalResults, Results{
+						ResponseStatus: resp.Status,
+						Host: s,
+						IP: i,
+						Title: title,
+						ResponseHeaders: respHeaders,
+					})
+				}
 			}
 		}
 	}
@@ -126,10 +144,17 @@ func checkVHost(dialer *net.Dialer, s string, i string, v *bool, wg *sync.WaitGr
 func main() {
 	f := flag.String("f", "", "File to read from")
 	v := flag.Bool("v", false, "Show verbose errors")
+	ib := flag.Bool("b", false, "Include the Body of the response in the output")
+
 	flag.Parse()
 
+	
 	if *f == "" {
 		log.Fatal("No file specified")
+	}
+
+	if *ib {
+		includeBody = true
 	}
 
 	file, err := os.Open(*f)
@@ -232,7 +257,7 @@ func main() {
 	}
 	wg.Wait()
 
-	writeFilename := fmt.Sprintf("vhosts_%s.txt", time.Now().Format("2006-01-02_15-04-05"))
+	writeFilename := fmt.Sprintf("vhosts_%s.json", time.Now().Format("2006-01-02_15-04-05"))
 
 	// Write the results to a file in the format of IP: Host like the /etc/hosts file
 	fh, err := os.Create(writeFilename)
