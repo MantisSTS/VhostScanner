@@ -1,10 +1,10 @@
-
 package main
 
 import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -15,8 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"encoding/json"
-	
+
 	"github.com/fatih/color"
 )
 
@@ -27,20 +26,27 @@ type TLSxResults struct {
 }
 
 type Results struct {
-	ResponseStatus string `json:omitempty`
-	Host string
-	IP   string
-	Title string
+	ResponseStatus  string `json:"ResponseStatus,omitempty"`
+	Host            string `json:"Host"`
+	IP              string `json:"IP"`
+	Title           string `json:"Title"`
 	ResponseHeaders []string
-	ResponseBody    string
+	ResponseBody    string `json:"ResponseBody,omitempty"`
+}
+
+type Flags struct {
+	file        string
+	verbose     bool
+	includeBody bool
 }
 
 var (
-	finalResults []Results
-	includeBody bool
+	finalResults sync.Map
+	flags        Flags
+	clientPool   sync.Pool
 )
 
-func checkVHost(dialer *net.Dialer, s string, i string, v *bool, wg *sync.WaitGroup) {
+func checkVHost(dialer *net.Dialer, s string, i string, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	conn, err := tls.DialWithDialer(dialer, "tcp", i+":443", &tls.Config{
@@ -49,136 +55,109 @@ func checkVHost(dialer *net.Dialer, s string, i string, v *bool, wg *sync.WaitGr
 	})
 
 	if err != nil {
-		if *v {
+		if flags.verbose {
 			log.Printf("Could not connect to %s: %v\n", s, err)
 		}
 		return
 	}
 	defer conn.Close()
 
-	http.DefaultTransport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+	client := clientPool.Get().(*http.Client)
+	client.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if addr == s+":443" {
 			addr = i + ":443"
 		}
 		return dialer.DialContext(ctx, network, addr)
 	}
 
-	// Perform http request
-	httpReq, err := http.NewRequest("GET", "https://"+s+"/", nil)
+	httpReq, err := http.NewRequestWithContext(context.Background(), "GET", "https://"+s+"/", nil)
 	if err != nil {
-		if *v {
+		if flags.verbose {
 			log.Printf("Could not create request: %v", err)
 		}
+		return
 	}
 
 	httpReq.Host = s
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
-		if *v {
+		if flags.verbose {
 			log.Printf("Could not send request: %v", err)
 		}
-	} else {
-		defer resp.Body.Close()
+		return
+	}
+	defer resp.Body.Close()
 
-		body, err := io.ReadAll(io.Reader(resp.Body))
-		if err != nil {
-			if *v {
-				log.Printf("Could not read response: %v", err)
-			}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		if flags.verbose {
+			log.Printf("Could not read response: %v", err)
 		}
+		return
+	}
 
-		if body != nil {
-			// color.Green("VHost Found! [Host: %s | IP: %s]\n", s, i)
-			// Check if the domain found in the SAN resolves to an IP address using DNS
-			_, err = net.LookupIP(s)
-			if err != nil {
-				color.Green("Interesting Vhost: %s: %s\n", s, i)
-				
+	if body != nil {
+		_, err = net.LookupIP(s)
+		if err != nil {
+			color.Green("Interesting Vhost: %s: %s\n", s, i)
 
-				// Print all the HTTP response headers
-				fmt.Println("-------------")
-				// Print the response status
-				fmt.Printf("Status: %s\n", resp.Status)
-
-				// Print the response body title
-				title := ""
-				if strings.Contains(string(body), "<title>") {
-					start := strings.Index(string(body), "<title>")
-					end := strings.Index(string(body), "</title>")
-					title = string(body)[start+len("<title>") : end]
-				}
-				fmt.Printf("Title: %s\n", title)
-				var respHeaders []string
-				// Print the response headers
-				for k, v := range resp.Header {
-					fmt.Printf("%s: %s\n", k, strings.Join(v, " "))
-					respHeaders = append(respHeaders, fmt.Sprintf("%s: %s", k, strings.Join(v, " ")))
-				}
-				fmt.Println("-------------")
-
-				// Append to finalResults
-				if includeBody {
-					finalResults = append(finalResults, Results{
-						ResponseStatus: resp.Status,
-						Host: s, 
-						IP: i,
-						Title: title,
-						ResponseHeaders: respHeaders,
-						ResponseBody: string(body),
-					})
-				} else {
-					finalResults = append(finalResults, Results{
-						ResponseStatus: resp.Status,
-						Host: s,
-						IP: i,
-						Title: title,
-						ResponseHeaders: respHeaders,
-					})
-				}
+			title := ""
+			if strings.Contains(string(body), "<title>") {
+				start := strings.Index(string(body), "<title>")
+				end := strings.Index(string(body), "</title>")
+				title = string(body)[start+len("<title>") : end]
 			}
+
+			var respHeaders []string
+			for k, v := range resp.Header {
+				respHeaders = append(respHeaders, fmt.Sprintf("%s: %s", k, strings.Join(v, " ")))
+			}
+
+			result := Results{
+				ResponseStatus:  resp.Status,
+				Host:            s,
+				IP:              i,
+				Title:           title,
+				ResponseHeaders: respHeaders,
+			}
+
+			if flags.includeBody {
+				result.ResponseBody = string(body)
+			}
+
+			finalResults.Store(s, result)
 		}
 	}
+	clientPool.Put(client)
 }
 
 func main() {
-	f := flag.String("f", "", "File to read from")
-	v := flag.Bool("v", false, "Show verbose errors")
-	ib := flag.Bool("b", false, "Include the Body of the response in the output")
-
+	// Todo: add concurrency flag
+	flag.StringVar(&flags.file, "f", "", "File to read from")
+	flag.BoolVar(&flags.verbose, "v", false, "Show verbose errors")
+	flag.BoolVar(&flags.includeBody, "b", false, "Include the Body of the response in the output")
 	flag.Parse()
 
-	
-	if *f == "" {
+	if flags.file == "" {
 		log.Fatal("No file specified")
 	}
 
-	if *ib {
-		includeBody = true
-	}
-
-	file, err := os.Open(*f)
+	file, err := os.Open(flags.file)
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	defer file.Close()
 
 	var tlsxResults []TLSxResults
-
 	scanner := bufio.NewScanner(file)
 
-	// var results []Results
 	for scanner.Scan() {
-
-		line := scanner.Text()
-		line = strings.TrimSpace(line)
-
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
 
-		// Split the line by space
 		parts := strings.Split(line, " ")
 		if len(parts) < 2 {
 			continue
@@ -186,39 +165,35 @@ func main() {
 
 		san := strings.Trim(parts[1], "[]")
 		if len(tlsxResults) == 0 {
-			var t TLSxResults
-			t.Host = parts[0]
-			t.SAN = append(t.SAN, san)
-			tlsxResults = append(tlsxResults, t)
+			tlsxResults = append(tlsxResults, TLSxResults{
+				Host: parts[0],
+				SAN:  []string{san},
+			})
 			continue
 		}
 
-		// Check if the host already exists in the slice
 		found := false
 		for i, t := range tlsxResults {
 			if t.Host == parts[0] {
 				found = true
-				// Check if the SAN already exists for the host, if not add it
-				sanFound := false
 				for _, existingSAN := range t.SAN {
 					if existingSAN == san {
-						sanFound = true
+						found = true
 						break
 					}
 				}
-				if !sanFound {
+				if !found {
 					tlsxResults[i].SAN = append(tlsxResults[i].SAN, san)
 				}
 				break
 			}
 		}
 
-		// If the host was not found in the slice, add a new entry
 		if !found {
-			var t TLSxResults
-			t.Host = parts[0]
-			t.SAN = append(t.SAN, san)
-			tlsxResults = append(tlsxResults, t)
+			tlsxResults = append(tlsxResults, TLSxResults{
+				Host: parts[0],
+				SAN:  []string{san},
+			})
 		}
 	}
 
@@ -229,16 +204,15 @@ func main() {
 	var wg sync.WaitGroup
 
 	for _, t := range tlsxResults {
-
-		host := strings.Replace(t.Host, "https://", "", -1)
-		host = strings.Replace(t.Host, ":443", "", -1)
+		host := strings.ReplaceAll(strings.ReplaceAll(t.Host, "https://", ""), ":443", "")
 		ip, err := net.LookupIP(host)
-
 		if err != nil {
-			if *v {
+			if flags.verbose {
 				log.Printf("Could not resolve IP for %s: %v\n", t.Host, err)
 			}
+			continue
 		}
+
 		for _, i := range ip {
 			t.IP = append(t.IP, i.String())
 		}
@@ -251,67 +225,47 @@ func main() {
 		for _, s := range t.SAN {
 			for _, i := range t.IP {
 				wg.Add(1)
-				go checkVHost(dialer, s, i, v, &wg)
+				// Todo: use concurrency flag for how many goroutines to run
+				go checkVHost(dialer, s, i, &wg)
 			}
 		}
 	}
+
 	wg.Wait()
 
 	writeFilename := fmt.Sprintf("vhosts_%s.json", time.Now().Format("2006-01-02_15-04-05"))
-
-	// Write the results to a file in the format of IP: Host like the /etc/hosts file
 	fh, err := os.Create(writeFilename)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer fh.Close()
-	// fh.WriteString("##### Interesting Vhosts ##### \n")
-	// for _, r := range finalResults {
-		// var data string
-		// // Print all the HTTP response headers
-		// data += fmt.Sprintf("-------------\n")
-		// // Print the response status
-		// data += fmt.Sprintf("Status: %s\n", r.ResponseStatus)
-		// data += fmt.Sprintf("Title: %s\n", r.Title)
-		// // Print the response headers
-		// for _, v := range r.ResponseHeaders {
-		// 	for k, x := range v {
-		// 		data += fmt.Sprintf("%s: %s\n", k, x)
-		// 	}
-		// }
-		// data += fmt.Sprintf("-------------")
-		
-		jsonData, err := json.Marshal(finalResults) 
-		if err != nil {
-			log.Fatal(err)
-		}
-		_, err = fh.Write(jsonData)
-		// _, err := fh.WriteString(r.IP + " " + r.Host + "\n" + data  + "\n")
 
-		if err != nil {  
-			log.Fatal(err)
+	enc := json.NewEncoder(fh)
+	finalResults.Range(func(key, value interface{}) bool {
+		err := enc.Encode(value)
+		if err != nil {
+			log.Printf("Could not encode JSON: %v", err)
 		}
-	// }
+		return true
+	})
+
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	color.Green("Results written to %s\n", writeFilename)
 }
 
-//func removeDuplicates(elements []Results) []Results {
-	// Use map to record duplicates as we find them.
-//	encountered := map[Results]bool{}
-//	result := []Results{}
-//
-/*	for v := range elements {
-		if encountered[elements[v]] {
-			// Do not add duplicate.
-		} else {
-			// Record this element as an encountered element.
-			encountered[elements[v]] = true
-			// Append to result slice.
-			result = append(result, elements[v])
-		}
+func init() {
+	clientPool = sync.Pool{
+		New: func() interface{} {
+			return &http.Client{
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{
+						InsecureSkipVerify: true,
+					},
+				},
+			}
+		},
 	}
-	// Return the new slice.
-	return result
 }
-*/
